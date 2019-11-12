@@ -72,9 +72,18 @@ void ctrl_add_fds(int *n, fd_set * rfds);
 void ctrl_check_fds(fd_set * rfds, fd_set * wfds);
 
 /* disk.c */
+uint32 disk_add_devices(uint32 *id, char *name, char *mnt);
+uint32 disk_del_devices(uint32 *id, char *path);
+int disk_enum_automount(uint32 *id, char *optarg);
+void automount_add_fds(int *n, fd_set *rfds);
+void automount_check_fds(fd_set *rfds, uint32 *maxid);
 int disk_enum_devices(uint32 * id, char *optarg);
 RD_NTSTATUS disk_query_information(RD_NTHANDLE handle, uint32 info_class, STREAM out);
 RD_NTSTATUS disk_set_information(RD_NTHANDLE handle, uint32 info_class, STREAM in, STREAM out);
+RD_NTSTATUS disk_create_inotify(uint32 id, RD_NTHANDLE handle, uint32 info_class);
+void disk_cancel_inotify(RD_NTHANDLE handle);
+void inotify_add_fds(int *n, fd_set *rfds);
+void inotify_check_fds(fd_set *rfds, uint32 *maxid);
 RD_NTSTATUS disk_check_notify(RD_NTHANDLE handle);
 RD_NTSTATUS disk_create_notify(RD_NTHANDLE handle, uint32 info_class);
 RD_NTSTATUS disk_query_volume_information(RD_NTHANDLE handle, uint32 info_class, STREAM out);
@@ -179,6 +188,8 @@ void convert_to_unix_filename(char *filename);
 void rdpdr_send_completion(uint32 device, uint32 id, uint32 status, uint32 result, uint8 * buffer,
 			   uint32 length);
 RD_BOOL rdpdr_init();
+void rdpdr_send_device_new(uint32 id);
+void rdpdr_send_device_del(uint32 id);
 void rdpdr_add_fds(int *n, fd_set * rfds, fd_set * wfds, struct timeval *tv, RD_BOOL * timeout);
 struct async_iorequest *rdpdr_remove_iorequest(struct async_iorequest *prev,
 					       struct async_iorequest *iorq);

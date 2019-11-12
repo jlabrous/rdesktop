@@ -447,6 +447,8 @@ enum RDP_INPUT_DEVICE
 #define TSSNDCAPS_VOLUME                   0x00000002
 
 /* RDPDR constants */
+#define DEVICE_TYPE_NONE                0x00 /* internal use */
+
 #define RDPDR_MAX_DEVICES               0x10
 #define DEVICE_TYPE_SERIAL              0x01
 #define DEVICE_TYPE_PARALLEL            0x02

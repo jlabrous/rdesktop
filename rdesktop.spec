@@ -1,7 +1,7 @@
 Summary: Remote Desktop Protocol client
 Name: rdesktop
 Version: 1.8.2
-Release: 1
+Release: 1.inotify.1
 License: GPL; see COPYING
 Group: Applications/Communications
 Source: rdesktop-%{version}.tar.gz

@@ -214,6 +214,9 @@ usage(char *program)
 	fprintf(stderr,
 		"         '-r disk:floppy=/mnt/floppy': enable redirection of /mnt/floppy to 'floppy' share\n");
 	fprintf(stderr, "             or   'floppy=/mnt/floppy,cdrom=/mnt/cdrom'\n");
+#ifdef HAVE_INOTIFY_H
+        fprintf(stderr, "         '-r disk:auto<XXXX>=/media': enable automount redirection of PnP media\n");
+#endif
 	fprintf(stderr, "         '-r clientname=<client name>': Set the client name displayed\n");
 	fprintf(stderr, "             for redirected disks\n");
 	fprintf(stderr,
@@ -845,6 +848,13 @@ main(int argc, char *argv[])
 #endif
 					}
 				}
+#ifdef HAVE_INOTIFY_H
+                                else if (str_startswith(optarg, "disk:auto"))
+                                {
+                                        /* -r disk:automount=/media */
+                                        disk_enum_automount(&g_num_devices, strchr(optarg,'='));
+                                }
+#endif
 				else if (str_startswith(optarg, "disk"))
 				{
 					/* -r disk:h:=/mnt/floppy */

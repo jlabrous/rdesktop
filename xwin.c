@@ -2681,6 +2681,10 @@ ui_select(int rdp_socket)
 #endif
 
 		/* add redirection handles */
+#ifdef HAVE_INOTIFY_H
+                automount_add_fds(&n, &rfds);
+                inotify_add_fds(&n, &rfds);
+#endif
 		rdpdr_add_fds(&n, &rfds, &wfds, &tv, &s_timeout);
 		seamless_select_timeout(&tv);
 

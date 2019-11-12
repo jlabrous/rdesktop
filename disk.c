@@ -110,6 +110,13 @@
 #define F_NAMELEN(buf) (255)
 #endif
 
+#ifdef HAVE_INOTIFY_H
+#include <sys/inotify.h> 
+#define INOTIFY_MSG_NUM 1024
+#define INOTIFY_BUFF_SIZE ((sizeof(struct inotify_event)+FILENAME_MAX)*INOTIFY_MSG_NUM)
+char inotify_buff[INOTIFY_BUFF_SIZE];
+#endif
+
 /* Dummy statfs fallback */
 #ifndef STATFS_T
 struct dummy_statfs_t
@@ -139,6 +146,33 @@ dummy_statfs(struct dummy_statfs_t *buf)
 #define STATFS_FN(path,buf) (dummy_statfs(buf))
 #endif
 
+/* ChangeNotify flags. */
+#define FILE_NOTIFY_CHANGE_FILE_NAME   0x001
+#define FILE_NOTIFY_CHANGE_DIR_NAME    0x002
+#define FILE_NOTIFY_CHANGE_ATTRIBUTES  0x004
+#define FILE_NOTIFY_CHANGE_SIZE        0x008
+#define FILE_NOTIFY_CHANGE_LAST_WRITE  0x010
+#define FILE_NOTIFY_CHANGE_LAST_ACCESS 0x020
+#define FILE_NOTIFY_CHANGE_CREATION    0x040
+#define FILE_NOTIFY_CHANGE_EA          0x080
+#define FILE_NOTIFY_CHANGE_SECURITY    0x100
+#define FILE_NOTIFY_CHANGE_STREAM_NAME	0x00000200
+#define FILE_NOTIFY_CHANGE_STREAM_SIZE	0x00000400
+#define FILE_NOTIFY_CHANGE_STREAM_WRITE	0x00000800
+
+#define FILE_NOTIFY_CHANGE_NAME \
+	(FILE_NOTIFY_CHANGE_FILE_NAME|FILE_NOTIFY_CHANGE_DIR_NAME)
+
+/* change notify action results */
+#define NOTIFY_ACTION_ADDED 1
+#define NOTIFY_ACTION_REMOVED 2
+#define NOTIFY_ACTION_MODIFIED 3
+#define NOTIFY_ACTION_OLD_NAME 4
+#define NOTIFY_ACTION_NEW_NAME 5
+#define NOTIFY_ACTION_ADDED_STREAM 6
+#define NOTIFY_ACTION_REMOVED_STREAM 7
+#define NOTIFY_ACTION_MODIFIED_STREAM 8
+
 extern RDPDR_DEVICE g_rdpdr_device[];
 
 FILEINFO g_fileinfo[MAX_OPEN_FILES];
@@ -152,8 +186,9 @@ typedef struct
 	char type[PATH_MAX];
 } FsInfoType;
 
+#ifndef HAVE_INOTIFY_H
 static RD_NTSTATUS NotifyInfo(RD_NTHANDLE handle, uint32 info_class, NOTIFY * p);
-
+#endif
 static time_t
 get_create_time(struct stat *filestat)
 {
@@ -304,6 +339,131 @@ open_weak_exclusive(const char *pathname, int flags, mode_t mode)
 		return open(pathname, flags & ~O_EXCL, mode);
 	}
 }
+
+uint32
+disk_add_devices(uint32 * id, char *name, char *mnt)
+{
+        uint32 i;
+
+        for (i = 0; i< *id;i++) {
+          if (g_rdpdr_device[i].device_type == DEVICE_TYPE_NONE) break;
+        }
+
+        if (i >= RDPDR_MAX_DEVICES) return (*id);
+        
+        strncpy(g_rdpdr_device[i].name, name, sizeof(g_rdpdr_device[i].name) - 1);
+        if (strlen(name) > (sizeof(g_rdpdr_device[i].name) - 1))
+          fprintf(stderr, "share name %s truncated to %s\n", name,g_rdpdr_device[i].name);
+
+        g_rdpdr_device[i].local_path = (char *) xmalloc(strlen(mnt) + 1);
+        strcpy(g_rdpdr_device[i].local_path, mnt);
+        g_rdpdr_device[i].device_type = DEVICE_TYPE_DISK;
+        if ( *id == i ) (*id)++;
+        DEBUG(("DISK add %s id=%d max=%d\n",mnt,i,*id));
+        return (i);
+}
+
+uint32
+disk_del_devices(uint32 * id, char *path)
+{
+  uint32 i;
+  for (i = 0; i< *id;i++) {
+    if (strcmp(g_rdpdr_device[i].local_path,path) == 0){    
+      g_rdpdr_device[i].device_type = DEVICE_TYPE_NONE;
+      break;
+    }
+  }
+  DEBUG(("DISK del %s id=%d\n",path,i));
+  return i;
+}
+
+#if defined(HAVE_INOTIFY_H) || defined(MAKE_PROTO)
+/* ADD DEVICE with INOTIFY */
+
+#define AUTOMOUNT_MAX 100
+
+static int automount_fd=-1;
+static char *automount_root[AUTOMOUNT_MAX];
+
+int disk_enum_automount(uint32 * id, char *optarg)
+{
+   if (automount_fd == -1) {
+     automount_fd = inotify_init();
+   }
+
+   struct dirent *entry;
+   int count = 0;
+        /* skip the first egual */
+   while ( *optarg && (*(optarg++) != '='));
+
+   DIR *dir = opendir(optarg);
+   if (dir) {
+
+   int wd = inotify_add_watch (automount_fd, optarg, IN_CREATE | IN_DELETE );
+   printf ("disk_enum_automount %s\n",optarg);
+   if (wd < AUTOMOUNT_MAX) {
+     automount_root[wd] = optarg;
+   } else {
+     inotify_rm_watch(automount_fd,wd);
+   }
+
+
+   while ( (entry = readdir(dir)) != NULL ) {
+     char path[PATH_MAX];
+     sprintf(path,"%s/%s",optarg,entry->d_name);
+     struct stat buf;
+     lstat(path,&buf);
+     if (S_ISDIR(buf.st_mode) && (entry->d_name[0] != '.')) {
+       disk_add_devices(id, entry->d_name, path);
+       count++;
+     }
+   }
+   closedir (dir);
+ }
+ return count;
+}
+
+void automount_add_fds(int *n, fd_set * rfds)
+{
+  if (automount_fd != -1) {
+    FD_SET(automount_fd, rfds);
+    *n = MAX(*n, automount_fd);
+  }
+}
+
+void automount_check_fds(fd_set * rfds,uint32 *maxid)
+{
+  if (automount_fd == -1) return;
+
+  if (FD_ISSET(automount_fd, rfds)) {
+    ssize_t len, i = 0;
+    len = read (automount_fd, inotify_buff, INOTIFY_BUFF_SIZE);
+    while (i < len) {
+      struct inotify_event *pevent = (struct inotify_event *)&inotify_buff[i];
+      int wd = pevent->wd;
+      if ( wd < AUTOMOUNT_MAX ) {
+        char fullpath[PATH_MAX];
+        printf ("automount_check_fds %s %s 0x%04X\n",automount_root[wd],pevent->name,pevent->mask);
+        
+        if ((pevent->mask  & IN_ISDIR) == IN_ISDIR) {
+          sprintf(fullpath,"%s/%s",automount_root[wd],pevent->name);
+          if (pevent->mask & IN_CREATE) {
+            uint32 id = disk_add_devices(maxid, pevent->name, fullpath);
+            printf ("DISK add %s %d %d\n",fullpath,id,*maxid);
+            if (id < *maxid ) rdpdr_send_device_new( id );
+          }
+          if (pevent->mask & IN_DELETE ) {
+            uint32 id = disk_del_devices(maxid, fullpath);
+            printf ("DISK del %s %d %d\n",fullpath,id,*maxid);
+            if (id < *maxid ) rdpdr_send_device_del( id );
+          }           
+        } 
+      }
+      i += sizeof(struct inotify_event) + pevent->len;
+    }
+  }
+}
+#endif /* HAVE_INOTIFY_H */
 
 /* Enumeration of devices from rdesktop.c        */
 /* returns numer of units found and initialized. */
@@ -922,6 +1082,211 @@ disk_set_information(RD_NTHANDLE handle, uint32 info_class, STREAM in, STREAM ou
 	return RD_STATUS_SUCCESS;
 }
 
+
+#if defined(HAVE_INOTIFY_H) || defined(MAKE_PROTO)
+/* NOTIFY with INOTIFY */
+#define NOTIFY_MAX 100
+
+static int notify_fd=-1;
+
+struct {
+  RD_NTHANDLE handle;
+  uint32 device_id;
+  uint32 msgid;
+  uint32 info_class;
+  int first_ev;
+  int last_ev;
+  int overrun;
+} notify_wd[NOTIFY_MAX];
+
+struct {
+  int next;
+  struct inotify_event* pevent;
+} notify_event[NOTIFY_MAX];
+
+int active_wd[NOTIFY_MAX];
+
+RD_NTSTATUS
+disk_create_inotify(uint32 msgid,RD_NTHANDLE handle, uint32 info_class)
+{
+
+        struct fileinfo *pfinfo;
+
+        pfinfo = &(g_fileinfo[handle]);
+        printf("start disk_create_notify %s info_class %X\n", pfinfo->path,info_class);
+        pfinfo->info_class = info_class;
+#if 0
+	uint32_t inotify_mask = IN_MASK_ADD |
+	  (info_class & FILE_NOTIFY_CHANGE_NAME)? IN_CREATE|IN_DELETE|IN_MOVED_FROM|IN_MOVED_TO : 0 |
+	  (info_class & FILE_NOTIFY_CHANGE_ATTRIBUTES)? IN_ATTRIB|IN_MOVED_TO|IN_MOVED_FROM|IN_MODIFY : 0 |
+	  (info_class & FILE_NOTIFY_CHANGE_SIZE)? IN_MODIFY : 0 |
+	  (info_class & FILE_NOTIFY_CHANGE_LAST_WRITE)? IN_CLOSE_WRITE | IN_ATTRIB : 0 |
+	  (info_class & FILE_NOTIFY_CHANGE_LAST_ACCESS)? IN_CLOSE | IN_ATTRIB : 0 |
+	  (info_class & FILE_NOTIFY_CHANGE_CREATION)? IN_CREATE | IN_ATTRIB : 0 |
+	  (info_class & FILE_NOTIFY_CHANGE_EA)? IN_ATTRIB : 0 |
+	  (info_class & FILE_NOTIFY_CHANGE_SECURITY)? IN_ATTRIB : 0 /*|
+	  (info_class & FILE_NOTIFY_CHANGE_STREAM_NAME)? IN_MODIFY : 0 |
+	  (info_class & FILE_NOTIFY_CHANGE_STREAM_SIZE)? IN_MODIFY : 0 |
+	  (info_class & FILE_NOTIFY_CHANGE_STREAM_WRITE)? IN_MODIFY : 0*/ ;
+#else
+	uint32_t inotify_mask = IN_CREATE | IN_DELETE | IN_MOVE |
+				IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE;
+#endif
+        int wd = inotify_add_watch (notify_fd, pfinfo->path, inotify_mask );
+
+        if (wd < AUTOMOUNT_MAX) {
+          notify_wd[wd].handle = handle;
+          notify_wd[wd].msgid = msgid;
+          notify_wd[wd].info_class = info_class;
+          notify_wd[wd].first_ev = 0;
+          notify_wd[wd].device_id = pfinfo->device_id;
+          notify_wd[wd].overrun = 0;
+	  pfinfo->wd = wd;
+        } else {
+          inotify_rm_watch(notify_fd,wd);
+        }
+
+        return RD_STATUS_PENDING;
+}
+
+void
+disk_cancel_inotify(RD_NTHANDLE handle)
+{
+        struct fileinfo *pfinfo;
+        pfinfo = &(g_fileinfo[handle]);
+
+        printf("start disk_cancel_notify %d %s\n", handle, pfinfo->path);
+        int wd = pfinfo->wd;
+        if (wd) {
+          inotify_rm_watch (notify_fd, wd );
+          pfinfo->wd = 0;
+          notify_wd[wd].handle = 0;
+        }
+}
+
+void inotify_add_fds(int *n, fd_set * rfds)
+{
+  if (notify_fd == -1) {
+    notify_fd = inotify_init();
+  }
+  if (notify_fd>0) {
+    FD_SET(notify_fd, rfds);
+    *n = MAX(*n, notify_fd);
+  }
+}
+
+uint8 smb2_buffer[((12+FILENAME_MAX*2)*INOTIFY_MSG_NUM)];
+
+void inotify_check_fds(fd_set * rfds,uint32 *maxid)
+{
+  int ev_max=1,ev_idx;
+  int active_max=0,active_idx;
+
+  if (notify_fd == -1 ) return;
+
+  if (FD_ISSET(notify_fd, rfds)) {
+    ssize_t len, i = 0;
+    len = read (notify_fd, inotify_buff, INOTIFY_BUFF_SIZE);
+    while (i < len) {
+      struct inotify_event *pevent = (struct inotify_event *)&inotify_buff[i];
+      int wd = pevent->wd;
+      RD_NTHANDLE handle = 0;
+      printf ("notify_check_fds wd=%d %s 0x%04X %d %d\n",wd,pevent->name,pevent->mask,i,len);
+       if ( wd < NOTIFY_MAX ) {
+        handle = notify_wd[wd].handle;
+        printf ("handle=%d\n",handle);
+      }
+
+      if (handle != 0) {
+	/* dispatch */
+	uint32 msgid = notify_wd[wd].msgid;
+	if (msgid != 0) {
+          ev_idx =ev_max++;
+	  notify_event[ev_idx].next=0;
+
+	  notify_event[ev_idx].pevent = pevent;
+
+	  if (notify_wd[wd].first_ev == 0) {
+            printf ("F %d-%d EVT=0x%04x,FILE=%s\n",wd,ev_idx,pevent->mask,pevent->name);
+	    notify_wd[wd].first_ev = notify_wd[wd].last_ev = ev_idx;
+	    active_wd[active_max++]=wd;
+	  } else {
+            printf ("N %d-%d EVT=0x%04x,FILE=%s\n",wd,ev_idx,pevent->mask,pevent->name);
+	    notify_event[notify_wd[wd].last_ev].next = ev_idx;
+	    notify_wd[wd].last_ev = ev_idx;
+          }
+        }
+      }
+      i += sizeof(struct inotify_event) + pevent->len;
+    }
+
+    
+    for (active_idx=0;active_idx<active_max;active_idx++) {
+
+      int wd = active_wd[active_idx];
+
+      struct stream out;
+      out.data = out.p = smb2_buffer;
+      out.size = sizeof(smb2_buffer);
+      
+      uint32 action = 0;
+      uint32 status = RD_STATUS_SUCCESS;
+      if (notify_wd[wd].overrun != 0) {
+	status = RD_STATUS_NOTIFY_ENUM_DIR;
+	notify_wd[wd].overrun = 0;
+      }
+
+      for (ev_idx = notify_wd[wd].first_ev;ev_idx;ev_idx=notify_event[ev_idx].next) {
+	struct inotify_event *pevent = notify_event[ev_idx].pevent;
+	if (pevent->mask & IN_IGNORED) {
+	  break;
+	} else if (pevent->mask & IN_Q_OVERFLOW) {
+          status = RD_STATUS_NOTIFY_ENUM_DIR;
+	  break;
+	} else if (pevent->mask & IN_CREATE) {
+	  action=NOTIFY_ACTION_ADDED;
+	} else if (pevent->mask & IN_DELETE) {
+	  action=NOTIFY_ACTION_REMOVED;
+	} else if (pevent->mask & IN_MOVED_FROM) {
+	  action=NOTIFY_ACTION_OLD_NAME;
+	} else if (pevent->mask & IN_MOVED_TO) {
+	  action=NOTIFY_ACTION_NEW_NAME;
+	} else {
+	  action=NOTIFY_ACTION_MODIFIED;
+	}
+
+	printf ("%d-%d ACTION=0x%04x,FILE=%s\n",active_idx,ev_idx,action,pevent->name);
+
+	uint32 namelen = (strlen(pevent->name) + 1) * 2; //JLB
+	uint32 offset = namelen + 12;
+
+	out_uint32_le(&out,offset); 			// NextEntryOffset
+ 	out_uint32_le(&out,action); 			// Action
+ 	out_uint32_le(&out,namelen);			// FileNameLength
+	rdp_out_unistr(&out, pevent->name , namelen - 2); 	//NotifyChange
+      }
+
+      if (notify_wd[wd].msgid != 0 ) {
+        uint32 length = (int)(out.p - out.data);
+        rdpdr_send_completion(notify_wd[wd].device_id,notify_wd[wd].msgid,status, length, out.data, length);
+        notify_wd[wd].msgid=0;
+      } else {
+        printf ("Message lost %d\n",notify_wd[wd].overrun);
+	notify_wd[wd].overrun ++;
+      }
+
+      notify_wd[wd].first_ev = 0;
+
+/* notify_wd[wd].handle = 0; */
+
+    }
+  }
+}
+
+#endif /* HAVE_INOTIFY_H */
+
+#if !defined(HAVE_INOTIFY_H) || defined(MAKE_PROTO)
+
 RD_NTSTATUS
 disk_check_notify(RD_NTHANDLE handle)
 {
@@ -1028,6 +1393,7 @@ NotifyInfo(RD_NTHANDLE handle, uint32 info_class, NOTIFY * p)
 
 	return RD_STATUS_PENDING;
 }
+#endif /* HAVE_INOTIFY_H */
 
 static FsInfoType *
 FsVolumeInfo(char *fpath)

@@ -314,6 +314,25 @@ rdpdr_send_available(void)
 }
 
 void
+rdpdr_send_device_new(uint32 id)
+{
+  rdpdr_send_available();
+}
+void
+rdpdr_send_device_del(uint32 id)
+{
+        uint8 magic[4] = "rDMD";
+        STREAM s;
+        s = channel_init(rdpdr_channel, 8);
+        out_uint8a(s, magic, 4);
+        out_uint32_le(s, 1);
+        out_uint32_le(s, id);
+        s_mark_end(s);
+        channel_send(s, rdpdr_channel);
+}
+
+
+void
 rdpdr_send_completion(uint32 device, uint32 id, uint32 status, uint32 result, uint8 * buffer,
 		      uint32 length)
 {
@@ -657,14 +676,21 @@ rdpdr_process_irp(STREAM s)
 					/* JIF
 					   unimpl("IRP major=0x%x minor=0x%x: IRP_MN_NOTIFY_CHANGE_DIRECTORY\n", major, minor);  */
 
-					in_uint32_le(s, info_level);	/* notify mask */
-
+                                        {uint8 watchtree;
+					in_uint8(s, watchtree);    /* notify mask */
+                                        in_uint32_le(s, info_level);    /* notify mask */
+#ifdef HAVE_INOTIFY_H
+                                        status = disk_create_inotify(id,file, info_level);
+                                        result = 0;
+#else
 					status = disk_create_notify(file, info_level);
 					result = 0;
 
 					if (status == RD_STATUS_PENDING)
 						add_async_iorequest(device, file, id, major, length,
 								    fns, 0, 0, NULL, 0);
+#endif
+					 }
 					break;
 
 				default:
@@ -858,7 +884,6 @@ rdpdr_init()
 		channel_register("rdpdr",
 				 CHANNEL_OPTION_INITIALIZED | CHANNEL_OPTION_COMPRESS_RDP,
 				 rdpdr_process);
-
 	return (rdpdr_channel != NULL);
 }
 
@@ -1137,6 +1162,7 @@ _rdpdr_check_fds(fd_set * rfds, fd_set * wfds, RD_BOOL timed_out)
 			iorq = iorq->next;
 	}
 
+#ifndef HAVE_INOTIFY_H
 	/* Check notify */
 	iorq = g_iorequest;
 	prev = NULL;
@@ -1178,6 +1204,7 @@ _rdpdr_check_fds(fd_set * rfds, fd_set * wfds, RD_BOOL timed_out)
 		if (iorq)
 			iorq = iorq->next;
 	}
+#endif /* HAVE_INOTIFY_H */
 
 }
 
@@ -1196,6 +1223,11 @@ rdpdr_check_fds(fd_set * rfds, fd_set * wfds, RD_BOOL timed_out)
 
 	_rdpdr_check_fds(&dummy, &dummy, False);
 	_rdpdr_check_fds(rfds, wfds, timed_out);
+
+#ifdef HAVE_INOTIFY_H
+        automount_check_fds(rfds,&g_num_devices);
+        inotify_check_fds(rfds,&g_num_devices);
+#endif
 }
 
 

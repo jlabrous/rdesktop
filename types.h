@@ -288,7 +288,11 @@ typedef struct fileinfo
 	struct dirent *pdirent;
 	char pattern[PATH_MAX];
 	RD_BOOL delete_on_close;
+#ifdef HAVE_INOTIFY_H
+        int wd;
+#else
 	NOTIFY notify;
+#endif
 	uint32 info_class;
 }
 FILEINFO;
